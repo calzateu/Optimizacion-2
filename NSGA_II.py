@@ -6,8 +6,8 @@ import random
 import matplotlib.pyplot as plt
 from collections import defaultdict
 
-def cargar_modelo(ruta):
-    mesh = tm.load("Modelos_3D/face_1.obj", file_type='obj')
+def cargar_modelo(ruta, tipo):
+    mesh = tm.load(ruta, file_type=tipo)
     v = mesh.vertices
     f = dl(v[:,(0,1)])
     mesh = tm.Trimesh(vertices=v, faces=f.simplices)
@@ -15,19 +15,22 @@ def cargar_modelo(ruta):
     return mesh
 
 class NSGA_II:
-    def __init__(self, vertices, num_population, maximo_porcentaje_puntos_a_quitar, num_generaciones, tasa_mutación):
+    def __init__(self, vertices, num_population, maximo_porcentaje_puntos_a_quitar, num_generaciones, tasa_mutación, area):
         self.vertices = vertices
         self.num_population = num_population
         self.maximo_porcentaje_a_quitar = maximo_porcentaje_puntos_a_quitar
         self.num_generaciones = num_generaciones
         self.tasa_mutación = tasa_mutación
+        self.area = area
 
         self.numero_vertices = len(self.vertices)
 
         self.population = None
         self.fitness_values = None
-        self.fronteras = None
+        self.fronteras = None  # ----> [[5, 10], [1,2,3], [8,9]]
         self.crowdingdistances = None
+        self.map_fit_ind = None
+        self.offspring = None
 
     def population_initialization(self):
         population = []
@@ -38,6 +41,8 @@ class NSGA_II:
             population.append(individuo)
 
         self.population = np.array(population)
+
+        return np.array(population)
 
     def _numero_puntos_a_quitar(self, numero_puntos_originales, maximo_porcentaje_a_quitar):
         maximo_puntos_a_quitar = int(maximo_porcentaje_a_quitar * numero_puntos_originales)
@@ -51,16 +56,6 @@ class NSGA_II:
 
         return puntos
 
-    def crear_offspring(self):
-        offspring = np.zeros(self.population.shape)
-        for i in range(self.population.shape[0]):
-            for j in range(self.population.shape[1]):
-                if random.random() < self.tasa_mutación:
-                    offspring[i,j] = 1 if self.population[i,j] == 0 else 0
-
-        self.population = np.concatenate((self.population, offspring), axis=0)
-        return offspring
-
     def evaluation(self):
         fitness_values = np.zeros((self.population.shape[0], 2)) # because of 2 objective functions
         for i, chromosome in enumerate(self.population):
@@ -68,9 +63,10 @@ class NSGA_II:
             mesh = tm.Trimesh(vertices=self.vertices[chromosome == 1], faces=faces.simplices)
             for j in range(2):
                 if j == 0:      # objective 1
-                    fitness_values[i,j] = mesh.area
+                    fitness_values[i,j] = np.abs(self.area - mesh.area)
                 elif j == 1:     # objective 2
-                    fitness_values[i,j] = len(faces.simplices)
+                    #fitness_values[i,j] = len(faces.simplices)
+                    fitness_values[i,j] = sum(chromosome)
 
         def totuple(a):
             try:
@@ -81,6 +77,16 @@ class NSGA_II:
         fitness_values = totuple(fitness_values)
 
         self.fitness_values = fitness_values
+
+    # def crear_offspring(self):
+    #     offspring = np.zeros(self.population.shape)
+    #     for i in range(self.population.shape[0]):
+    #         for j in range(self.population.shape[1]):
+    #             if random.random() < self.tasa_mutación:
+    #                 offspring[i,j] = 1 if self.population[i,j] == 0 else 0
+
+    #     self.population = np.concatenate((self.population, offspring), axis=0)
+    #     return offspring
 
     def _dominates(self, obj1, obj2, sign=[-1, -1]):
         """Return true if each objective of *self* is not strictly worse than
@@ -151,6 +157,7 @@ class NSGA_II:
 
         fronts = [[]]  # The first front
         for fit in current_front:
+            #print(f'{fit} {map_fit_ind[fit]}')
             fronts[-1].extend(map_fit_ind[fit])
         pareto_sorted = len(fronts[-1])
 
@@ -163,16 +170,17 @@ class NSGA_II:
                 fronts.append([])
                 for fit_p in current_front:
                     # Iterate Sn in current fronts
-                    for fit_d in dominated_fits[fit_p]: 
+                    for fit_d in dominated_fits[fit_p]:
                         dominating_fits[fit_d] -= 1  # Next front -> Sn - 1
                         if dominating_fits[fit_d] == 0:  # Sn=0 -> next front
                             next_front.append(fit_d)
                             # Count and append chromosomes with same objectives
-                            pareto_sorted += len(map_fit_ind[fit_d]) 
+                            pareto_sorted += len(map_fit_ind[fit_d])
                             fronts[-1].extend(map_fit_ind[fit_d])
                 current_front = next_front
                 next_front = []
 
+        self.map_fit_ind = map_fit_ind #### Para buscar los individuos después
         self.fronteras = fronts
 
     def CrowdingDist(self):
@@ -210,6 +218,101 @@ class NSGA_II:
 
         self.crowdingdistances = distances
 
+    def crear_offspring(self):
+        offspring = []
+        for _ in range(self.num_population):
+            indice_padre_1 = self._seleccion()
+            indice_padre_2 = self._seleccion()
+            hijo1, hijo2 = self._crossover(indice_padre_1, indice_padre_2)
+
+            hijo1 = self._mutacion(hijo1)
+            hijo2 = self._mutacion(hijo2)
+
+            offspring.append(hijo1)
+            offspring.append(hijo2)
+
+        #self.offspring = offspring
+        offspring = np.array(offspring)
+        self.population = np.concatenate((self.population, offspring))
+
+    def _seleccion(self):
+        seleccionado = None
+        indice_padre_1 = random.randint(0, self.population.shape[0]-1)
+        indice_padre_2 = random.randint(0, self.population.shape[0]-1)
+        padre_1 = self.map_fit_ind[self.fitness_values[indice_padre_1]]
+        padre_2 = self.map_fit_ind[self.fitness_values[indice_padre_2]]
+        rango_padre_1 = self._bucar_fronteras(padre_1[0])
+        rango_padre_2 = self._bucar_fronteras(padre_2[0])
+        if rango_padre_1 < rango_padre_2:
+            #seleccionado = padre_1[0]
+            seleccionado = indice_padre_1
+        elif rango_padre_1 == rango_padre_2:
+            if self.crowdingdistances[indice_padre_1] < self.crowdingdistances[indice_padre_2]:
+                #seleccionado = padre_1[0]
+                seleccionado = indice_padre_1
+            else:
+                #seleccionado = padre_2[0]
+                seleccionado = indice_padre_2
+        else:
+            #seleccionado = padre_2[0]
+            seleccionado = indice_padre_2
+
+        return seleccionado
+
+    def _bucar_fronteras(self, elemento):
+        for i in range(len(self.fronteras)):
+            for j in range(len(self.fronteras[i])):
+                if elemento == self.fronteras[i][j]:
+                    return i
+
+    def _crossover(self, indice_padre_1, indice_padre_2):
+        padre_1 = self.population[indice_padre_1]
+        padre_2 = self.population[indice_padre_2]
+        hijo1 = np.zeros(len(padre_1))
+        hijo2 = np.zeros(len(padre_1))
+        for i in range(len(padre_1)):
+            if random.random() > 0.5:
+                hijo1[i] = padre_1[i]
+                hijo2[i] = padre_2[i]
+            else:
+                hijo2[i] = padre_1[i]
+                hijo1[i] = padre_2[i]
+
+        return hijo1, hijo2
+
+    def _mutacion(self, hijo):
+        tasa_mutacion = 1/len(hijo)
+        #tasa_mutacion = 0.1
+        for i in range(len(hijo)):
+            if random.random() < tasa_mutacion:
+                hijo[i] = 1 if hijo[i] == 0 else 0
+
+        return hijo
+
+    def seleccion(self):
+        indices = self._seleccion_generation()
+        new_population = []
+        for i in indices:
+            new_population.append(self.population[i])
+
+        self.population = np.array(new_population)
+
+    def _seleccion_generation(self):
+        """
+        :return: A list of selected individuals
+        """
+        self.evaluation()
+        self.sortNondominated()
+        self.CrowdingDist()
+        new_population = []
+        i = 0
+        for j in self.fronteras:
+            for k in j:
+                new_population.append(k)
+                i += 1
+                if i == self.num_population:
+                    return new_population
+
     def graficar_pareto(self):
         fitness_values = np.array(self.fitness_values)
         plt.plot(fitness_values[:,0], fitness_values[:,1], 'o')
@@ -224,23 +327,33 @@ class NSGA_II:
             tm.Trimesh(vertices=self.vertices[self.population[i] == 1], faces=faces.simplices).show()
 
     def run(self):
+        self.offspring = self.population_initialization()
+        self.population_initialization()
         for i in range(self.num_generaciones):
-            self.population_initialization()
-            self.crear_offspring()
             self.evaluation()
             self.sortNondominated()
             self.CrowdingDist()
-            padres = []
-            # while len(padres) < self.num_population:
-            #     padres.append(self.population[self.fronteras[0][0]])
-            print(len(self.crowdingdistances))
+            self.crear_offspring()
+            self.seleccion()
 
+            print(f'Generacion {i+1}')
+            print(len(self.population))
+            print(len(self.offspring))
+            fitness_values = np.array(self.fitness_values)
+            print(f'Mejores individuos: {fitness_values[self.fronteras[0]]}')
+            self.graficar_pareto()
+        self.graficar_pareto()
+        self.mostrar_individuos(1)
+        #print(min(self.fitness_values[:,1]))
 
 if __name__ == "__main__":
-    mesh = cargar_modelo("Modelos_3D/face_1.obj")
-    optimizador = NSGA_II(mesh.vertices, 100, 0.4, 10, 0.5)
+    mesh = cargar_modelo("Modelos_3D/face_1.obj", 'obj')
+    area = mesh.area
+    optimizador = NSGA_II(mesh.vertices, 10, 0.4, 10, 0.5, area)
 
     optimizador.run()
+
+    #print(len(mesh.vertices))
 
 
 
